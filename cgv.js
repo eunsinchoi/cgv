@@ -15,8 +15,15 @@ const { chromium } = require("playwright");
  *   J19-20 → I19-20 → L19-20 →
  *   J21-22 → ...
  *
+ * 실행 흐름:
+ * 0. CGV 로그인 페이지를 먼저 열고 사용자가 직접 로그인
+ * 1. 로그인 완료 후 8/26 편성 감시 시작
+ * 2. 4회차 등장 + 예매 가능 상태 감지
+ * 3. 2명 / 연속 2좌석 자동 선택
+ * 4. 선택완료까지 진행
+ *
  * 결제 자체는 자동으로 진행하지 않습니다.
- * CAPTCHA/추가 인증이 나타나면 직접 처리해야 합니다.
+ * 아이디/비밀번호/CAPTCHA/추가 인증은 직접 처리합니다.
  */
 
 const CONFIG = {
@@ -36,6 +43,12 @@ const CONFIG = {
   domTimeoutMs: 30000,
 
   bookingUrl: "https://cgv.co.kr/cnm/movieBook/movie",
+  loginUrl: "https://cgv.co.kr/mem/login?returnUrl=%2Ftme%2FtmeShowMore",
+
+  // 로그인은 사용자가 직접 입력합니다.
+  // 로그인 완료를 기다리는 최대 시간
+  loginTimeoutMs: 10 * 60 * 1000,
+
   userDataDir: "./browser-data",
 };
 
@@ -177,6 +190,63 @@ async function waitForOpening(context) {
 /* 로그인                                                              */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 프로그램 시작 직후 로그인 페이지로 이동합니다.
+ *
+ * - 아이디/비밀번호: 사용자가 직접 입력
+ * - CAPTCHA/추가 인증: 사용자가 직접 처리
+ * - 로그인 완료 후 자동으로 예매 감시를 시작
+ *
+ * persistent context(browser-data)를 사용하므로 로그인 세션이 남아 있으면
+ * 다음 실행에서는 CGV가 로그인 페이지를 바로 넘기거나 이미 로그인 상태일 수 있습니다.
+ */
+async function loginFirst(page) {
+  log("🔐 먼저 CGV 로그인 페이지를 엽니다.");
+  log("아이디 / 비밀번호 / 자동입력 방지문자는 브라우저에서 직접 입력하세요.");
+
+  await page.goto(CONFIG.loginUrl, {
+    waitUntil: "domcontentloaded",
+  });
+
+  // 이미 로그인된 세션이라 CGV가 로그인 페이지를 건너뛴 경우
+  if (!page.url().includes("/mem/login")) {
+    log("✅ 이미 로그인된 세션으로 확인됩니다.");
+    return;
+  }
+
+  alarm();
+
+  const captcha = page.locator('input#loginInput3[name="captcha"]');
+
+  if ((await captcha.count()) > 0) {
+    log("자동입력 방지문자 입력창을 확인했습니다.");
+    await captcha.focus().catch(() => {});
+  }
+
+  log("⏸️ 로그인 완료를 기다립니다. 로그인 버튼도 직접 눌러주세요.");
+
+  try {
+    await page.waitForURL(
+      (url) => !url.pathname.includes("/mem/login"),
+      { timeout: CONFIG.loginTimeoutMs }
+    );
+  } catch {
+    throw new Error(
+      `로그인이 ${CONFIG.loginTimeoutMs / 60000}분 안에 완료되지 않았습니다.`
+    );
+  }
+
+  log("✅ 로그인 완료 감지:", page.url());
+
+  // 로그인 세션/쿠키 반영 시간을 조금 준다.
+  await page.waitForTimeout(500);
+}
+
+
+/**
+ * 예매 도중 세션이 만료되어 로그인 안내 모달이 뜨는 경우의 fallback.
+ * 정상 사용에서는 시작할 때 먼저 로그인하므로 거의 호출되지 않습니다.
+ */
 async function clickLoginModalIfPresent(page) {
   const modal = page
     .locator('.cgv-modal[role="dialog"]')
@@ -187,36 +257,35 @@ async function clickLoginModalIfPresent(page) {
   const confirm = modal.getByRole("button", { name: "확인", exact: true });
   if ((await confirm.count()) === 0) return false;
 
-  log("로그인 안내 모달 → [확인]");
+  log("⚠️ 로그인 세션 만료 감지 → 로그인 안내 [확인]");
   await confirm.click();
   return true;
 }
 
-async function waitForManualLoginIfNeeded(page) {
-  // 로그인 URL로 넘어왔거나 CAPTCHA input이 보이면 수동 로그인을 기다린다.
-  const captcha = page.locator('input#loginInput3[name="captcha"]');
 
-  const isLoginPage =
-    page.url().includes("/mem/login") || (await captcha.count()) > 0;
+/**
+ * 예매 도중 로그인 페이지로 이동한 경우의 fallback.
+ * 아이디/비밀번호/CAPTCHA는 모두 사용자가 직접 처리합니다.
+ */
+async function waitForManualLoginIfNeeded(page) {
+  const isLoginPage = page.url().includes("/mem/login");
 
   if (!isLoginPage) return false;
 
   alarm();
-  log("🔐 로그인이 필요합니다.");
-  log("브라우저에서 ID/PW 및 자동입력 방지문자를 직접 입력해 로그인하세요.");
-  log("로그인 완료를 최대 5분 기다립니다.");
+  log("⚠️ 예매 도중 로그인이 다시 필요합니다.");
+  log("브라우저에서 직접 로그인해 주세요.");
 
-  await page
-    .waitForURL((url) => !url.pathname.includes("/mem/login"), {
-      timeout: 5 * 60 * 1000,
-    })
-    .catch(() => {});
-
-  if (page.url().includes("/mem/login")) {
-    throw new Error("5분 안에 로그인이 완료되지 않았습니다.");
+  try {
+    await page.waitForURL(
+      (url) => !url.pathname.includes("/mem/login"),
+      { timeout: CONFIG.loginTimeoutMs }
+    );
+  } catch {
+    throw new Error("재로그인이 제한시간 내 완료되지 않았습니다.");
   }
 
-  log("✅ 로그인 완료 감지");
+  log("✅ 재로그인 완료");
   return true;
 }
 
@@ -563,14 +632,18 @@ async function completeSeatSelection(page) {
   });
 
   try {
-    await gotoBookingPage(page);
+    /*
+     * 0. 가장 먼저 로그인
+     *
+     * 사용자가 브라우저에서 아이디/비밀번호/CAPTCHA를 직접 입력하고
+     * 로그인 버튼을 누르면, 로그인 완료를 감지한 뒤 감시를 시작합니다.
+     */
+    await loginFirst(page);
 
-    // 이미 로그인되어 있으면 가장 좋다.
-    // 로그인 페이지라면 사용자가 직접 로그인한 뒤 원래 페이지로 돌아온다.
-    if (page.url().includes("/mem/login")) {
-      await waitForManualLoginIfNeeded(page);
-      await gotoBookingPage(page);
-    }
+    /*
+     * 1. 로그인 완료 후 예매 페이지를 열어 둔 다음 편성 감시 시작
+     */
+    await gotoBookingPage(page);
 
     const schedule = await waitForOpening(context);
 
