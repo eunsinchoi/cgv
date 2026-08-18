@@ -1,0 +1,12 @@
+{
+  "name": "cgv-imax-booking-helper",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CGV 용산 IMAX 예매 감지 및 좌석 선택 Playwright 보조 스크립트",
+  "scripts": {
+    "start": "node cgv.js"
+  },
+  "dependencies": {
+    "playwright": "^1.54.0"
+  }
+}
