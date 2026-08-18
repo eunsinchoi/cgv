@@ -34,13 +34,20 @@ const CONFIG = {
   scnYmd: "20260826",
   scnSseq: "4",
 
-  rowPriority: ["J", "I", "L"],
+  rowPriority: ["J", "I", "K","L","M", "N", "O", "P"],
   centerLeft: 20,
   maxDistance: 15,
 
   scheduleIntervalMs: 5000,
   controlIntervalMs: 2000,
   domTimeoutMs: 30000,
+
+  // 로그인 완료 후 예매 오픈 감시 최대 시간(분)
+  // 0 = 자동 종료 없이 계속 감시
+  watchTimeoutMinutes: 0,
+
+  // 연속 2좌석을 실제로 선택한 직후 알람 시간(ms)
+  successAlarmMs: 10000,
 
   bookingUrl: "https://cgv.co.kr/cnm/movieBook/movie",
   loginUrl: "https://cgv.co.kr/mem/login?returnUrl=%2Ftme%2FtmeShowMore",
@@ -65,6 +72,60 @@ function log(...args) {
 function alarm() {
   // 터미널 벨
   process.stdout.write("\x07");
+}
+
+// 좌석 확보 성공 시 브라우저 + 터미널에서 길게 알림
+async function successAlarm(page) {
+  const durationMs = CONFIG.successAlarmMs;
+
+  // 브라우저를 앞으로 가져온다.
+  await page.bringToFront().catch(() => {});
+
+  // 브라우저 비프음: 짧은 비프를 durationMs 동안 반복
+  try {
+    await page.evaluate(async (duration) => {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+
+      const ctx = new AudioCtx();
+
+      // 사용자가 로그인 과정에서 브라우저를 직접 조작했으므로
+      // 일반적으로 오디오 재생 권한이 활성화되어 있다.
+      if (ctx.state === "suspended") {
+        await ctx.resume().catch(() => {});
+      }
+
+      const endAt = Date.now() + duration;
+
+      while (Date.now() < endAt) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+
+        osc.type = "sine";
+        osc.frequency.value = 880;
+        gain.gain.value = 0.12;
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+
+        osc.start();
+        osc.stop(ctx.currentTime + 0.22);
+
+        await new Promise(resolve => setTimeout(resolve, 350));
+      }
+
+      await ctx.close().catch(() => {});
+    }, durationMs);
+  } catch (err) {
+    console.error("[성공 알람 브라우저 재생 오류]", err.message);
+  }
+
+  // 터미널 벨도 같은 동안 반복
+  const endAt = Date.now() + durationMs;
+  while (Date.now() < endAt) {
+    alarm();
+    await sleep(500);
+  }
 }
 
 async function jsonOrThrow(response, name) {
@@ -145,17 +206,56 @@ async function searchControl(context) {
 async function waitForOpening(context) {
   log("8/26 용산 IMAX 오디세이 4회차 감시 시작");
 
+  const startedAt = Date.now();
+  const timeoutMs =
+    CONFIG.watchTimeoutMinutes > 0
+      ? CONFIG.watchTimeoutMinutes * 60 * 1000
+      : 0;
+
+  const checkTimeout = () => {
+    if (
+      timeoutMs > 0 &&
+      Date.now() - startedAt >= timeoutMs
+    ) {
+      throw new Error(
+        `자동 감시 종료: ${CONFIG.watchTimeoutMinutes}분 동안 예매 오픈을 감지하지 못했습니다.`
+      );
+    }
+  };
+
   let schedule = null;
 
   while (!schedule) {
+    checkTimeout();
+
     try {
       schedule = await searchSchedule(context);
 
       if (!schedule) {
-        log("아직 IMAX 4회차 없음");
+        const elapsed = ((Date.now() - startedAt) / 60000).toFixed(1);
+
+        if (timeoutMs > 0) {
+          const remain = Math.max(
+            0,
+            (timeoutMs - (Date.now() - startedAt)) / 60000
+          ).toFixed(1);
+
+          log(
+            `아직 IMAX 4회차 없음 | 경과 ${elapsed}분 | 자동종료까지 약 ${remain}분`
+          );
+        } else {
+          log(
+            `아직 IMAX 4회차 없음 | 경과 ${elapsed}분 | 자동종료 없음`
+          );
+        }
+
         await sleep(CONFIG.scheduleIntervalMs);
       }
     } catch (err) {
+      if (String(err.message || "").startsWith("자동 감시 종료:")) {
+        throw err;
+      }
+
       console.error("[편성 조회 오류]", err.message);
       await sleep(CONFIG.scheduleIntervalMs);
     }
@@ -168,6 +268,8 @@ async function waitForOpening(context) {
   );
 
   while (true) {
+    checkTimeout();
+
     try {
       const control = await searchControl(context);
       log("rtktCntlYn =", control);
@@ -179,6 +281,10 @@ async function waitForOpening(context) {
         return schedule;
       }
     } catch (err) {
+      if (String(err.message || "").startsWith("자동 감시 종료:")) {
+        throw err;
+      }
+
       console.error("[통제 조회 오류]", err.message);
     }
 
@@ -577,6 +683,11 @@ async function selectBestSeats(page) {
     await refreshedRight.click();
     log(`✅ ${pair.names[1]} 클릭`);
 
+    log(
+      `🔔 연속 2좌석 선택 성공 - 약 ${CONFIG.successAlarmMs / 1000}초 알람`
+    );
+    await successAlarm(page);
+
     return pair;
   }
 
@@ -676,6 +787,11 @@ async function completeSeatSelection(page) {
     alarm();
     console.error("\n🛑 자동화 중단");
     console.error(err);
+
+    if (String(err?.message || "").startsWith("자동 감시 종료:")) {
+      console.error("\n⏱️ 설정한 감시 시간이 지나 자동으로 감시를 종료했습니다.");
+    }
+
     console.error("\n브라우저는 닫지 않았습니다. 현재 화면을 확인하세요.");
   }
 

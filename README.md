@@ -89,6 +89,27 @@ const CONFIG = {
 };
 ```
 
+## 감시 자동 종료 / 성공 알람
+
+로그인은 기존처럼 **프로그램 실행 직후 가장 먼저** 진행됩니다. 로그인 완료 후부터 아래 감시 타이머가 시작됩니다.
+
+`cgv.js`의 `CONFIG`에서 변경할 수 있습니다.
+
+```js
+// 로그인 완료 후 예매 오픈 감시 최대 시간(분)
+watchTimeoutMinutes: 60,
+
+// 연속 2좌석 선택 성공 후 알람 길이(ms)
+successAlarmMs: 10000,
+```
+
+- `watchTimeoutMinutes: 60` → 로그인 완료 후 최대 60분 감시
+- `watchTimeoutMinutes: 180` → 최대 3시간 감시
+- `watchTimeoutMinutes: 0` → 자동 종료 없이 계속 감시
+- 편성 등장 후 `rtktCntlYn=N`을 기다리는 시간도 동일한 감시 시간에 포함
+- 시간 초과 시 감시 로직은 종료되지만 Chrome 창은 그대로 유지
+- `successAlarmMs: 10000` → 두 좌석 클릭 성공 직후 약 10초간 반복 알람
+
 ## 주의
 
 CGV 웹페이지/API 구조가 변경되면 selector나 API가 동작하지 않을 수 있습니다.
