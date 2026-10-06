@@ -10,7 +10,7 @@ const CONFIG = {
     "https://cgv.co.kr/mem/login?returnUrl=%2Ftme%2FtmeShowMore",
 
   userDataDir:
-    "./browser-data",
+    "./browser-data", 
 
   // searchSchByMov 조회 주기
   // 페이지 새로고침이 아니라 fetch 조회만 반복
